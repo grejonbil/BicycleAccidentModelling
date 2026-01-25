@@ -1,0 +1,1054 @@
+---
+title: "Location_Prediction"
+author: "Gregory Biland"
+date: "2023-09-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# Set root directory to the parent of the R folder if needed, 
+# or ensure the RProj sets the working directory correctly.
+# knitr::opts_knit$set(root.dir = "..") # Uncomment if needed
+```
+
+## Packages
+
+```{r include=FALSE}
+# Data Manipulation
+library(dplyr)
+library(tidyverse)
+library(data.table)
+library(readr)
+library(collapse)
+
+# Spatial Data
+library(sf)
+library(spdep)
+library(mapview)
+library(tmap)
+library(cartography)
+library(ggmap)
+library(ggspatial)
+library(stars)
+library(raster)
+library(rasterVis)
+library(spgwr)
+
+# Modelling & ML
+library(lme4)
+library(caret)
+library(ranger)
+library(randomForest)
+library(xgboost)
+library(gbm)
+library(glmnet)
+library(nnet)
+library(MLeval)
+library(MLmetrics)
+library(pROC)
+library(boot)
+library(effects)
+library(sjPlot)
+
+# Visualization
+library(ggplot2)
+library(gridExtra)
+library(corrplot)
+library(car)
+library(ggsci)
+library(viridis)
+library(scico)
+library(RColorBrewer)
+library(ggthemes)  # Contains theme_map
+
+# Parallel Processing
+library(parallel)
+library(future)
+library(future.apply)
+library(furrr)
+
+# Utilities
+library(xtable)
+library(DHARMa)
+library(classInt)
+library(rlang)
+```
+
+## Setup & Data
+
+```{r include=FALSE}
+# Define file paths dynamically (Relative to the R script location)
+# Assumes structure:
+# Project/
+#   R/
+#     Location_Prediction_Clean.Rmd
+#   Data/
+base_path <- file.path("../Data")
+
+if (!dir.exists(base_path)) {
+  stop("Data directory not found. Please check working directory.")
+}
+
+folder_path_SHP <- file.path(base_path, "Accidents/SHP/")
+folder_path_figures <- file.path(base_path, "Figures/Publication/")
+
+# Ensure output directories exist
+if(!dir.exists(folder_path_figures)) dir.create(folder_path_figures, recursive = TRUE)
+
+# Load data
+accident_data_recoded <- st_read(file.path(folder_path_SHP, "accident_data_recoded.shp"))
+accident_data_recoded$Date <- as.character(accident_data_recoded$Date)
+
+Acc_dist <- st_read(file.path(base_path,"Accidents/Acc_dist.shp"))
+Acc_coords_df <- as.data.frame(st_coordinates(Acc_dist))
+
+PAP <- st_read(file.path(base_path, "Accidents/PAP/pseudo_absence_points.shp"))
+
+# Network & Topology
+RoadNetwork <- st_read(file.path(base_path, "Topology/Roads_Car/RoadNetwork.shp"))
+RedLight <- st_read(file.path(base_path, "Network/Traffic_lights/traffic_lights.shp"))
+PedestrianCrossing <- st_read(file.path(base_path, "Network/Pedestrian_crossing/FGS.shp"))
+StopSign <- st_read(file.path(base_path, "Network/Way_of_right/stop_signs.shp"))
+Junction <- st_read(file.path(base_path, "Network/Way_of_right/intersections3050.shp"))
+ROW <- st_read(file.path(base_path, "Network/Way_of_right/RVT.shp"))
+TramTrack <- st_read(file.path(base_path, "Topology/Tram_lines/tram_rails.shp"))
+TrafficArea <- st_read(file.path(base_path, "Network/Traffic_areas/Traffic_areas.shp"))
+Exposure <- st_read(file.path(base_path, "Topology/GVM-ZH Unfälle/GVM18.shp"))
+ComplexIntersection <- st_read(file.path(base_path, "Network/Roundabouts/Complex_Intersections.shp"))
+BicycleNetwork <- st_read(file.path(base_path, "Topology/Cycling_network/bicycle_roads.shp"))
+BusLane <- st_read(file.path(base_path, "Topology/Bus_Lines/Bus.shp"))
+PPS <- st_read(file.path(base_path, "Network/Public parking spaces/PPS_RW.shp"))
+
+# Boarders & Context
+lake_ZH <- st_read(file.path(base_path, "Spatial Data/Boarders/See_ZH.shp")) %>% st_transform(crs = 2056)
+stat_zonen <- st_read(file.path(base_path, "Spatial Data/Statistical Areas/statistical_areas.shp"))
+city_borders <- st_read(file.path(base_path, "Spatial Data/Boarders/city_boarders.shp"))
+zvv_stops <- st_read(file.path(base_path,"Network/ZVV_Haltestellen/Haltestellen_des_offentlichen_Verkehrs_-OGD.gpkg"))
+one_way <- st_read(file.path(base_path, "Possibilities/oneway/one_way.gpkg"))
+forest_ZH <- st_read(file.path(base_path, "Spatial Data/Boarders/Wald/Forrest_ZH.shp"))
+buildings <- st_read(file.path(base_path, "Spatial Data/Boarders/Buildings/Buildings.shp"))
+greenareas <- st_read(file.path(base_path, "Spatial Data/Boarders/Green_Area/greenarea.gpkg"))
+buffer_accidents <- st_read(file.path(base_path, "Spatial Data/Boarders/Negative_Buffer/Buffer_Accidents_NGreen.shp"))
+st_crs(forest_ZH) <- 2056
+```
+
+## Universal Functions
+
+```{r}
+# --- Helper Functions ---
+
+# Join points to closes roads
+join_points_to_roads <- function(points, roads, cols) {
+  distances <- sf::st_distance(points, roads)
+  closest_indices <- apply(distances, 1, function(x) {
+    if (any(is.finite(x))) {
+      which.min(x)
+    } else {
+      NA
+    }
+  })
+  
+  closest_roads <- roads[closest_indices, cols]
+  joined_data <- cbind(points, closest_roads)
+  return(joined_data)
+}
+
+# Filter probabilities
+filter_probabilities <- function(df, threshold = 0.8) {
+  df[df$predicted_accident_rate_gbm >= threshold, ]
+}
+
+# Normalize function
+normalize <- function(x) {
+  (x - min(x, na.rm = TRUE)) / (max(x, na.rm = TRUE) - min(x, na.rm = TRUE))
+}
+
+# Calculate RMSE
+calculate_rmse <- function(predictions, observations) {
+  sqrt(mean((predictions - observations)^2, na.rm = TRUE))
+}
+
+# --- Plotting Functions ---
+
+# Function to plot the map scenario
+plot_scenario_map <- function(data_filtered, title_text, output_filename = NULL) {
+  p <- ggplot() +
+    geom_sf(data = city_borders, fill = alpha("white", .1), color = "#cccccc", size = 0.3) +
+    geom_sf(data = forest_ZH, fill = alpha("green4", .2), color = NA) +
+    geom_sf(data = lake_ZH, fill = alpha("deepskyblue", .3), color = NA) +
+    geom_sf(data = RoadNetwork, color = "darkgrey", lwd = 0.2) +
+    stat_density_2d(data = Acc_coords_df, aes(x = X, y = Y, fill = after_stat(level), alpha = after_stat(level)), 
+                    geom = "polygon", h = c(500, 500)) +
+    scale_fill_gradient(low = "yellow", high = "red") +
+    scale_alpha_continuous(range = c(0, 1)) +
+    geom_sf(data = data_filtered, size = 0.1, color = "black") +
+    theme_map() +
+    labs(subtitle = title_text) +
+    theme(
+      text = element_text(size = 12),
+      plot.title = element_text(size = 15, hjust = 0.5, color = "black", face = "bold"),
+      plot.subtitle = element_text(size = 13, hjust = 0.5, color = "black", face = "italic"),
+      plot.caption = element_text(size = 7, hjust = 0),
+      plot.title.position = "plot",
+      plot.background = element_rect(fill = NA, color = "black"),
+      panel.background = element_blank(),
+      panel.grid = element_blank(),
+      axis.text = element_blank(),
+      axis.title = element_blank(),
+      legend.position = "none"
+    ) +
+    coord_sf(datum = st_crs(2056)) +
+    annotation_scale(location = "br", width_hint = 0.25, style = "ticks") +
+    labs(caption = paste0("Source: Open Data Zurich, 2023\n", "ggplot2 ", packageVersion("ggplot2")))
+  
+  if (!is.null(output_filename)) {
+    ggsave(file.path(folder_path_figures, output_filename), p, width = 8, height = 8)
+  }
+  return(p)
+}
+
+# Function to rasterize points
+rasterize_scenario <- function(scenario, field = "predicted_accident_rate_gbm", fun = mean, res = 25) {
+  example_points <- as(scenario, "Spatial")
+  extent_grid <- st_bbox(scenario)
+  
+  example_raster <- raster(nrows = ceiling((extent_grid$ymax - extent_grid$ymin) / res),
+                           ncols = ceiling((extent_grid$xmax - extent_grid$xmin) / res),
+                           xmn = extent_grid$xmin, xmx = extent_grid$xmax,
+                           ymn = extent_grid$ymin, ymx = extent_grid$ymax,
+                           crs = crs(example_points))
+  
+  rasterized_grid <- rasterize(example_points, example_raster, field = field, fun = fun)
+  return(rasterized_grid)
+}
+
+# Function to plot the grid map
+plot_scenario_grid <- function(raster_obj, title_text, output_filename = NULL, fill_name = "Probability", palette = "lajolla", limits = c(0, 1)) {
+  
+  test_spdf <- as(raster_obj, "SpatialPixelsDataFrame")
+  test_df <- as.data.frame(test_spdf)
+  colnames(test_df) <- c("value", "x", "y")
+  
+  p <- ggplot() +
+    geom_sf(data =  lake_ZH, fill = alpha("deepskyblue", .1), color = "#cccccc", size = 0.3) +
+    geom_sf(data = city_borders, fill = NA, color = "darkgrey", size = 0.3) +
+    geom_sf(data = RoadNetwork, color = "darkgrey", lwd = 0.2) +
+    geom_sf(data = forest_ZH, fill = alpha("green4", .2), color = NA) +
+    geom_tile(data = test_df, aes(x = x, y = y, fill = value), alpha = 0.8, color = NA) +
+    scale_fill_scico(name = fill_name, limits = limits, palette = palette, direction = -1) +
+    theme_minimal() +
+    labs(subtitle = title_text) +
+    theme(
+      text = element_text(size = 12),
+      plot.title = element_text(size = 15, hjust = 0.5, color = "black", face = "bold"),
+      plot.subtitle = element_text(size = 13, hjust = 0.5, color = "black", face = "italic"),
+      plot.caption = element_text(size = 7, hjust = 0),
+      plot.title.position = "plot",
+      plot.background = element_rect(fill = NA, color = "black"),
+      panel.background = element_blank(),
+      panel.grid = element_blank(),
+      axis.text = element_blank(),
+      axis.title = element_blank(),
+      legend.title = element_text(size = 8)
+    ) +
+    coord_sf(datum = st_crs(2056)) +
+    annotation_scale(location = "br", width_hint = 0.25, style = "ticks") +
+    labs(caption = paste0("Source: Open Data Zurich, 2023\n", "ggplot2 ", packageVersion("ggplot2")))
+  
+  if (!is.null(output_filename)) {
+    ggsave(file.path(folder_path_figures, output_filename), p, width = 8, height = 8)
+  }
+  return(p)
+}
+
+```
+
+# MODEL_Preperation
+## Adding Distances and Network/ Topology information:
+
+```{r eval=FALSE, include=FALSE}
+# Data preparation
+# This chunk prepares the Pseudo Absence Points (PAP) and Accident Data (ACC) combined dataset.
+
+ACC_5yr <- accident_data_recoded %>% filter(Year >= 2016)
+PAP_ACC <- rbind(PAP, ACC_5yr)
+
+# Initialize columns
+cols <- c("RedLight", "PedestrianCrossing", "StopSign", "Junction", "ROW", "TramTrack", "ComplexIntersection", "BusLane", "PPS","PT_Stops")
+PAP_ACC[cols] <- NA
+
+# SF objects to calculate distances
+sf_objects <- list(RedLight, PedestrianCrossing, StopSign, Junction, ROW, TramTrack, ComplexIntersection, BusLane, PPS,zvv_stops)
+
+# Parallel processing setup
+# Note: mclapply works on POSIX systems (Mac/Linux). For Windows, use parLapply.
+n_cores <- detectCores() - 1
+PAP_ACC_list <- mclapply(sf_objects, function(y) st_distance(x = PAP_ACC, y), mc.cores = n_cores)
+PAP_ACC[cols] <- lapply(PAP_ACC_list, function(d) sapply(1:nrow(d), function(i) min(d[i,], na.rm = TRUE)))
+
+# Spatial polygon processing
+PAP_ACC <- st_join(PAP_ACC, TrafficArea, join = st_intersects)
+PAP_ACC$zonentyp_t <- replace(PAP_ACC$zonentyp_t, is.na(PAP_ACC$zonentyp_t), 50)
+
+# Join data to closest roads and other layers
+cols_to_join <- c("SpedLmt", "RodWdth", "RodSrfc", "PPS")
+PAP_ACC <- join_points_to_roads(PAP_ACC, RoadNetwork, cols_to_join)
+PAP_ACC <- join_points_to_roads(PAP_ACC, Exposure, colnames(Exposure))
+PAP_ACC <- join_points_to_roads(PAP_ACC, BicycleNetwork, "bkTyp_b")
+
+# Create a 10m buffer around one-way streets
+one_way_buffers <- st_buffer(one_way, dist = 10)
+
+# Calculate the distance matrix between accidents and road lines
+distances <- st_distance(PAP_ACC, one_way)
+
+# Get the index of the closest road line for each accident point
+closest_roads <- apply(distances, MARGIN = 1, which.min)
+
+# Add the index of the closest road to the accidents data
+PAP_ACC <- PAP_ACC %>%
+  mutate(closest_road = closest_roads)
+
+# Spatial join with one_way_buffers using the closest road index
+PAP_ACC <- PAP_ACC %>%
+  mutate(objectid = one_way_buffers$objectid[closest_road]) %>%
+  mutate(direction = ifelse(st_intersects(geometry, one_way_buffers[closest_road,]) %>% lengths() > 0, 1, 2))
+
+# Select columns for final output
+selected_cols <- c("ID", "Date", "Year", "Month", "Week", "COVID", "accidnt", "qnr", "knr", 
+                   "RedLight", "PedestrianCrossing", "StopSign", "Junction", "ROW", "TramTrack", 
+                   "ComplexIntersection", "BusLane", "zonentyp_t", "PPS", "SpedLmt", "RodWdth", 
+                   "RodSrfc", "bkTyp_b", "Exposition", "geometry", "accidnt","PT_Stops", "direction")
+PAP_ACC_filtered <- PAP_ACC %>% dplyr::select(all_of(selected_cols))
+
+# Write to file
+output_path <- file.path(base_path, "Accidents/PAP_ACC.geojson")
+st_write(PAP_ACC_filtered, output_path, delete_dsn = TRUE)
+
+```
+
+###### Accident Locations Correlation:
+
+```{r}
+# Load and subset data
+# Load, subset, and preprocess data
+PAP_ACC <- st_read(file.path(base_path, "Accidents/PAP_ACC.geojson")) %>%
+  as.data.frame() %>%
+  dplyr::select(-Date, -geometry, -Year, -Month, -Week) %>%
+  filter(SpedLmt < 80, SpedLmt != 0) %>%
+  mutate(across(where(is.numeric), 
+                ~ (. - min(.)) / (max(.) - min(.)), 
+                .names = "{.col}_scaled"),
+         accidntFactor = as.factor(accidnt),
+         accidntFactorClass = factor(accidntFactor, levels = c(0, 1), labels = c("Class0", "Class1")))
+
+# Filter RoadNetwork data (ensure RoadNetwork is already loaded in setup)
+RoadNetwork <- RoadNetwork %>%
+  filter(SpedLmt < 80, SpedLmt != 0)
+
+```
+
+## LMER
+
+```{r cars, eval=FALSE, include=FALSE}
+# Create the generalized linear mixed model
+lmer_1 <- lmer(accidnt ~ PedestrianCrossing_scaled + StopSign_scaled + TramTrack_scaled + ComplexIntersection_scaled +
+  RodWdth_scaled + Exposition_scaled + zonentyp_t_scaled + ROW_scaled + PPS_scaled + bkTyp_b_scaled + BusLane_scaled + 
+  SpedLmt_scaled + PT_Stops_scaled + direction + 
+  RodWdth_scaled * SpedLmt_scaled + (SpedLmt_scaled | Exposition_scaled), 
+  data = PAP_ACC, 
+  control = lmerControl(optimizer = "Nelder_Mead"), 
+  REML = TRUE)
+
+# Print the model summary
+summary(lmer_1)
+AIC(lmer_1)
+
+vif(lmer_1)
+```
+
+### Predictions Accident Locations
+
+#### Distance Matrix & Random Points Calculation
+
+```{r eval=FALSE, include=FALSE}
+# Parameters
+grid_size <- c(8)
+point_count <- c(100000) # Number of points
+point_networks_random <- list()
+
+for (size in point_count) {
+
+  # Create a grid using the bounding box of the road buffer with the specified cell size
+  grid <- st_make_grid(st_bbox(buffer_accidents), cellsize = c(grid_size, grid_size), square = TRUE)
+  grid_sf <- st_sf(geometry = grid)
+  
+  # Intersect the grid with the road buffer
+  # Note: ensure buffer_accidents and city_borders logic is correct
+  grid_sf_clipped <- st_intersection(grid_sf, buffer_accidents) 
+
+  if (nrow(grid_sf_clipped) >= size) {
+    selected_cells <- grid_sf_clipped[sample(nrow(grid_sf_clipped), size), ]
+  } else {
+    warning("There are fewer than requested grid cells available after intersection. Using all available.")
+    selected_cells <- grid_sf_clipped
+  }
+  
+  # Create a random point within each selected cell
+  generate_random_point <- function(cell) {
+    bb <- st_bbox(cell)
+    x <- runif(1, bb["xmin"], bb["xmax"])
+    y <- runif(1, bb["ymin"], bb["ymax"])
+    st_point(c(x, y))
+  }
+  
+  points <- st_sfc(lapply(selected_cells$geometry, generate_random_point), crs = st_crs(selected_cells))
+  point_network_random <- st_sf(geometry = points)
+  
+  # Assign to the list with a dynamic name
+  point_networks_random[[paste0("point_network_random_", size)]] <- point_network_random
+}
+  
+cols_dist <- c("RedLight", "PedestrianCrossing", "StopSign", "Junction", "ROW", "TramTrack", 
+          "ComplexIntersection", "BusLane", "PPS", "PT_Stops")
+
+cols_to_join <- c("SpedLmt", "RodWdth", "RodSrfc", "PPS")
+sf_objects <- list(RedLight, PedestrianCrossing, StopSign, Junction, ROW, TramTrack, ComplexIntersection, BusLane, PPS, zvv_stops)
+
+# Function to process a chunk of data
+process_random_points_chunk <- function(data, sf_objects, cols_dist) {
+  
+  # Create a 10m buffer around one-way streets
+  one_way_buffers <- st_buffer(one_way, dist = 10)
+
+  # Calculate the distance matrix between accidents and road lines
+  distances <- st_distance(data, one_way)
+
+  # Get the index of the closest road line for each accident point
+  closest_roads <- apply(distances, MARGIN = 1, which.min)
+
+  # Add the index of the closest road to the accidents data
+  data <- data %>%
+    mutate(closest_road = closest_roads,
+           objectid = one_way$objectid[closest_roads],
+           direction = ifelse(st_intersects(geometry, one_way_buffers[closest_roads, ]) %>% lengths() > 0, 1, 2))
+  
+  # Calculate distances to features
+  # Ensure plan() is called outside or here if not set
+  # plan(multisession) # Use multisession for broader compatibility
+  
+  data_list <- future_lapply(sf_objects, function(y) st_distance(x = data, y = y))
+  data[cols_dist] <- lapply(data_list, function(d) sapply(1:nrow(d), function(i) min(d[i,], na.rm = TRUE)))
+
+  data <- st_join(data, TrafficArea, join = st_intersects)
+  data$zonentyp_t <- replace(data$zonentyp_t, is.na(data$zonentyp_t), 50)
+
+  data <- join_points_to_roads(data, RoadNetwork, cols_to_join)
+  data <- join_points_to_roads(data, Exposure, colnames(Exposure))
+  data <- join_points_to_roads(data, BicycleNetwork, "bkTyp_b")
+  
+  return(data)
+}
+
+# Set parallel plan once
+plan(multisession, workers = max(1, detectCores() - 1))
+
+# Main processing loop
+for (grid_name in names(point_networks_random)) {
+  
+  data <- point_networks_random[[grid_name]]
+  for (col in cols_dist) {
+    data[[col]] <- NA
+  }
+
+  # Chunk processing
+  chunk_size <- 1000
+  num_chunks <- ceiling(nrow(data) / chunk_size)
+  processed_data_list <- list()
+
+  for (i in 1:num_chunks) {
+    start_row <- ((i - 1) * chunk_size) + 1
+    end_row <- min(i * chunk_size, nrow(data))
+
+    data_chunk <- data[start_row:end_row, ]
+    processed_data_list[[i]] <- process_random_points_chunk(data_chunk, sf_objects, cols_dist)
+  }
+
+  # Combine all processed chunks
+  processed_data <- do.call(rbind, processed_data_list)
+
+  # Write to file
+  output_path <- file.path(base_path, "Prediction_Grid/Random", paste0(grid_name, ".geojson"))
+  # Ensure directory exists
+  dir.create(dirname(output_path), recursive = TRUE, showWarnings = FALSE)
+  st_write(processed_data, output_path, delete_dsn = TRUE)
+}
+
+```
+
+## Prediction evaluation:
+
+```{r}
+set.seed(123) # for reproducibility
+trainIndex_AccPred <- createDataPartition(PAP_ACC$accidntFactorClass, p = 0.9, list = FALSE)
+trainSet_AccPred <- PAP_ACC[trainIndex_AccPred, ]
+testSet_AccPred <- PAP_ACC[-trainIndex_AccPred, ]
+
+# Common Model Formula
+model_formula <- accidntFactorClass ~ PedestrianCrossing + StopSign + TramTrack + ComplexIntersection +
+              RodWdth + Exposition + zonentyp_t + ROW + PPS + bkTyp_b + BusLane + 
+              SpedLmt + PT_Stops + direction +
+              RodWdth * SpedLmt + SpedLmt * Exposition
+
+# Evaluation Control
+ctrl_eval <- trainControl(method="cv", 
+                     summaryFunction=twoClassSummary, 
+                     classProbs=TRUE,
+                     savePredictions = TRUE)
+```
+
+#GBM
+
+```{r}
+paramGrid_gbm <- expand.grid(
+  interaction.depth = 18,
+  n.trees = 300,
+  shrinkage = 0.05,
+  n.minobsinnode = 20
+)
+
+# Train the model using caret
+fit_GBM_eval <- train(model_formula, 
+              data = trainSet_AccPred, 
+              method = "gbm", 
+              trControl = ctrl_eval,
+              verbose = FALSE,
+              tuneGrid = paramGrid_gbm,
+              metric = "ROC")
+
+# Predict on the test set
+predictions_GBM <- predict(fit_GBM_eval, newdata = testSet_AccPred, type = "raw")
+probabilities_GBM <- predict(fit_GBM_eval, newdata = testSet_AccPred, type = "prob")
+
+# Performance
+cm_GBM <- confusionMatrix(predictions_GBM, testSet_AccPred$accidntFactorClass)
+print(cm_GBM)
+```
+
+#Random Forest
+
+```{r}
+paramGrid_rf <- expand.grid(mtry = 5)
+
+# Train the model using caret
+fit_RF_eval <- train(model_formula, 
+              data = trainSet_AccPred, 
+              method = "rf", 
+              trControl = ctrl_eval,
+              verbose = FALSE,
+              tuneGrid = paramGrid_rf,
+              metric = "ROC",
+              ntree = 500)
+
+predictions_RF <- predict(fit_RF_eval, newdata = testSet_AccPred, type = "raw")
+probabilities_RF <- predict(fit_RF_eval, newdata = testSet_AccPred, type = "prob")
+
+# Performance
+cm_RF <- confusionMatrix(predictions_RF, testSet_AccPred$accidntFactorClass)
+print(cm_RF)
+```
+
+#XGBoost
+
+```{r}
+paramGrid_xgb <- expand.grid(
+  eta = 0.1,
+  max_depth = 8,
+  gamma = 5,
+  colsample_bytree = 0.5,
+  min_child_weight = 10,
+  nrounds = 250,
+  subsample = 0.5
+)
+
+# Train the model using caret
+fit_XGB_eval <- train(model_formula, 
+              data = trainSet_AccPred, 
+              method = "xgbTree", 
+              trControl = ctrl_eval,
+              verbose = FALSE,
+              tuneGrid = paramGrid_xgb,
+              metric = "ROC")
+
+predictions_XGB <- predict(fit_XGB_eval, newdata = testSet_AccPred, type = "raw")
+probabilities_XGB <- predict(fit_XGB_eval, newdata = testSet_AccPred, type = "prob")
+
+# Performance
+cm_XGB <- confusionMatrix(predictions_XGB, testSet_AccPred$accidntFactorClass)
+print(cm_XGB)
+```
+
+```{r}
+## run MLeval
+res <- evalm(list(fit_GBM_eval,fit_RF_eval,fit_XGB_eval), gnames=c('gbm','rf',"xgbTree"))
+
+# ROC Curves
+roc_curve_GBM <- roc(testSet_AccPred$accidntFactorClass, probabilities_GBM$Class1) 
+roc_curve_RF <- roc(testSet_AccPred$accidntFactorClass, probabilities_RF$Class1) 
+roc_curve_XGB <- roc(testSet_AccPred$accidntFactorClass, probabilities_XGB$Class1) 
+
+# Convert ROC objects to data frames
+df_GBM <- data.frame(tpr = roc_curve_GBM$sensitivities, fpr = roc_curve_GBM$specificities, Model = 'GBM')
+df_RF <- data.frame(tpr = roc_curve_RF$sensitivities, fpr = roc_curve_RF$specificities, Model = 'RF')
+df_XGB <- data.frame(tpr = roc_curve_XGB$sensitivities, fpr = roc_curve_XGB$specificities, Model = 'XGB')
+
+roc_data <- rbind(df_GBM, df_RF, df_XGB)
+
+# Create the ROC plot using ggplot2
+ggplot(roc_data, aes(x = fpr, y = tpr, color = Model)) +
+  geom_line() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +
+  labs(title = "ROC Curve Comparison", x = "False Positive Rate", y = "True Positive Rate") +
+  theme_minimal() +
+  scale_color_manual(values = c("GBM" = "blue", "RF" = "red3", "XGB" = "lightgreen"))
+
+```
+
+## Prediction - Final Models
+
+```{r}
+ctrl_Pred <- trainControl(method="cv", 
+                     summaryFunction=twoClassSummary, 
+                     classProbs=TRUE,
+                     savePredictions = TRUE)
+
+# Train Final Models on Full Data
+fit_GBM <- train(model_formula, 
+              data = PAP_ACC, 
+              method = "gbm", 
+              trControl = ctrl_Pred,
+              verbose = FALSE,
+              tuneGrid = paramGrid_gbm,
+              metric = "ROC")
+
+fit_RF <- train(model_formula, 
+              data = PAP_ACC, 
+              method = "rf", 
+              trControl = ctrl_Pred,
+              verbose = FALSE,
+              tuneGrid = paramGrid_rf,
+              metric = "ROC",
+              ntree = 500)
+
+fit_XGB <- train(model_formula, 
+              data = PAP_ACC, 
+              method = "xgbTree", 
+              trControl = ctrl_Pred,
+              verbose = FALSE,
+              tuneGrid = paramGrid_xgb,
+              metric = "ROC")
+
+```
+
+### Prediction Processing Function
+
+```{r}
+# Generic function to process predictions for a scenario
+process_scenario_prediction <- function(distance, modifier_function = NULL) {
+  
+  # Read the file
+  fpath <- file.path(base_path, "Prediction_Grid/Random", paste0("point_network_random_", distance, ".geojson"))
+  if(!file.exists(fpath)) {
+     stop(paste("File not found:", fpath))
+  }
+  
+  point_network <- st_read(fpath, quiet = TRUE) %>%
+                   subset(SpedLmt < 80 & SpedLmt != 0)
+  
+  # Apply scenario modifications
+  if (!is.null(modifier_function)) {
+    point_network <- modifier_function(point_network)
+  }
+  
+  # Models' predictions
+  # Ensure fit_GBM, fit_RF, fit_XGB are available in the global environment
+  point_network$predicted_accident_rate_gbm <- predict(fit_GBM, newdata = point_network, type = "prob")[,2]
+  point_network$predicted_accident_rate_rf <- predict(fit_RF, newdata = point_network, type = "prob")[,2]
+  point_network$predicted_accident_rate_xgb <- predict(fit_XGB, newdata = point_network, type = "prob")[,2]
+  
+  point_network <- st_set_geometry(point_network, "geometry")
+
+  return(point_network)
+}
+```
+
+### Predicting Original Grid
+
+```{r}
+# Original Scenario (No modification)
+results_original <- process_scenario_prediction("100")
+filtered_original <- filter_probabilities(results_original)
+
+# Plot Map
+scenario_original_map <- plot_scenario_map(filtered_original, "Original Scenario", "scenario_original.png")
+print(scenario_original_map)
+
+# Plot Grid
+grid_original <- rasterize_scenario(results_original)
+scenario_original_grid <- plot_scenario_grid(grid_original, "Original Scenario", "scenario_original_grid.png")
+print(scenario_original_grid)
+```
+
+### RMSE
+#### Random 
+
+```{r eval=FALSE, include=FALSE}
+# RMSE Calculation Chunk
+# This section calculates RMSE for validation. Kept eval=FALSE as per original.
+
+# Function to bootstrap RMSE
+bootstrap_rmse <- function(observed, predicted) {
+  # boot function requires a statistic function
+  statistic_func <- function(data, indices) {
+    d <- data[indices, ]
+    return(calculate_rmse(d$predicted, d$observed))
+  }
+  
+  set.seed(123)
+  results <- boot(data = data.frame(observed = observed, predicted = predicted),
+                  statistic = statistic_func,
+                  R = 100)
+  return(results)
+}
+
+# Wrapper to process grid and calculate RMSE
+process_grid_rmse <- function(data_results, acc_dist, point_count_val) {
+  
+  data_results$ID <- seq_len(nrow(data_results))
+  bbox <- st_bbox(data_results)
+  
+  # Make grid
+  # Note: logic adapted to be more robust
+  grid_sf_geom <- st_make_grid(st_as_sfc(bbox), cellsize = 25, square = TRUE)
+  grid_sf <- st_sf(ID_GRID = seq_len(length(grid_sf_geom)), geometry = grid_sf_geom)
+  
+  # Count accidents per grid cell
+  grid_with_accidents <- st_join(grid_sf, acc_dist, join = st_intersects)
+  
+  grid_with_accidents <- grid_with_accidents %>%
+    group_by(ID_GRID) %>%
+    summarise(accidents = ifelse(all(is.na(ID)), 0, 1), .groups = 'drop') # ID from Acc_dist
+  
+  # Map point results to grid cells to compare
+  # This part assumes spatial relationship. 
+  # If results_original are points, we join them to the grid to aggregate predictions per cell.
+  
+  points_in_grid <- st_join(data_results, grid_sf, join = st_intersects)
+  
+  # Aggregate predictions per grid cell (mean probability)
+  grid_predictions <- points_in_grid %>%
+    st_drop_geometry() %>%
+    group_by(ID_GRID) %>%
+    summarise(
+      pred_gbm = mean(predicted_accident_rate_gbm, na.rm=TRUE),
+      pred_rf = mean(predicted_accident_rate_rf, na.rm=TRUE),
+      pred_xgb = mean(predicted_accident_rate_xgb, na.rm=TRUE),
+      .groups = 'drop'
+    )
+  
+  # Join accidents and predictions
+  comparison <- merge(st_drop_geometry(grid_with_accidents), grid_predictions, by = "ID_GRID")
+  comparison <- na.omit(comparison)
+  
+  rmse_gbm <- calculate_rmse(comparison$pred_gbm, comparison$accidents)
+  rmse_rf <- calculate_rmse(comparison$pred_rf, comparison$accidents)
+  rmse_xgb <- calculate_rmse(comparison$pred_xgb, comparison$accidents)
+  
+  return(data.frame(
+    point_count = point_count_val,
+    rmse_gbm = rmse_gbm,
+    rmse_rf = rmse_rf,
+    rmse_xgb = rmse_xgb
+  ))
+}
+
+# Example usage
+# res_rmse <- process_grid_rmse(results_original, Acc_dist, 200)
+```
+
+
+## Prediction Scenario
+
+Scenarios: 
+1. V30, Exposure 2000, Strasse 10% Breiter, Velotyp 3
+2. V50, Exposure 8000, Strasse 20% Schmaler, Velotyp 1
+3. V30
+4.1. V30, Exposure 8000, Strasse 30% Breiter, Velotyp 1
+4.2. V50, Exposure 2000, Strasse 20% Schmaler, Velotyp 2
+
+### Scenario 1
+
+Scenario where the speed is 30 in the entire city and the road width is 8m everywhere.
+
+```{r}
+# Modifier for Scenario 1
+modify_scenario_1 <- function(data) {
+  data$SpedLmt <- ifelse(data$SpedLmt >= 30, 30, data$SpedLmt)
+  data$RodWdth <- data$RodWdth * 1.1
+  data$Exposition <- 2000
+  data$bkTyp_b <- 3
+  return(data)
+}
+
+results_scenario_1 <- process_scenario_prediction("100", modify_scenario_1)
+filtered_scenario_1 <- filter_probabilities(results_scenario_1)
+
+# Plot
+scenario_1_map <- plot_scenario_map(filtered_scenario_1, "Scenario 1", "scenario_1.png")
+print(scenario_1_map)
+
+scenario_1_grid <- plot_scenario_grid(rasterize_scenario(results_scenario_1), "Scenario 1", "scenario_1_grid.png")
+print(scenario_1_grid)
+```
+
+### Scenario 2
+
+```{r}
+modify_scenario_2 <- function(data) {
+  data$SpedLmt <- 50
+  data$RodWdth <- data$RodWdth * 0.8
+  data$Exposition <- ifelse(data$Exposition <= 8000, 8000, data$Exposition)
+  data$bkTyp_b <- 1
+  return(data)
+}
+
+results_scenario_2 <- process_scenario_prediction("100", modify_scenario_2)
+filtered_scenario_2 <- filter_probabilities(results_scenario_2)
+
+scenario_2_map <- plot_scenario_map(filtered_scenario_2, "Scenario 2", "scenario_2.png")
+print(scenario_2_map)
+
+scenario_2_grid <- plot_scenario_grid(rasterize_scenario(results_scenario_2, fun = max), "Scenario 2", "scenario_2_grid.png")
+print(scenario_2_grid)
+```
+
+
+### Scenario 3
+
+Scenario where the speed is 30 in the entire city.
+
+```{r}
+modify_scenario_3 <- function(data) {
+  data$SpedLmt <- ifelse(data$SpedLmt >= 30, 30, data$SpedLmt)
+  return(data)
+}
+
+results_scenario_3 <- process_scenario_prediction("100", modify_scenario_3)
+filtered_scenario_3 <- filter_probabilities(results_scenario_3)
+
+scenario_3_map <- plot_scenario_map(filtered_scenario_3, "Scenario 3", "scenario_3.png")
+print(scenario_3_map)
+
+scenario_3_grid <- plot_scenario_grid(rasterize_scenario(results_scenario_3), "Scenario 3", "scenario_3_grid.png")
+print(scenario_3_grid)
+```
+
+
+### Scenario 4.1
+
+```{r}
+modify_scenario_4.1 <- function(data) {
+  data$SpedLmt <- ifelse(data$SpedLmt >= 30, 30, data$SpedLmt)
+  data$RodWdth <- data$RodWdth * 1.3
+  data$Exposition <- 8000
+  data$bkTyp_b <- 1
+  return(data)
+}
+
+results_scenario_4.1 <- process_scenario_prediction("100", modify_scenario_4.1)
+filtered_scenario_4.1 <- filter_probabilities(results_scenario_4.1)
+
+scenario_4.1_map <- plot_scenario_map(filtered_scenario_4.1, "Scenario 4.1", "scenario_4.1.png")
+print(scenario_4.1_map)
+
+scenario_4.1_grid <- plot_scenario_grid(rasterize_scenario(results_scenario_4.1), "Scenario 4.1", "scenario_4.1_grid.png")
+print(scenario_4.1_grid)
+```
+
+### Scenario 4.2
+
+```{r}
+modify_scenario_4.2 <- function(data) {
+  data$SpedLmt <- 50
+  data$RodWdth <- data$RodWdth * 0.8
+  data$Exposition <- 2000
+  data$bkTyp_b <- 2
+  return(data)
+}
+
+results_scenario_4.2 <- process_scenario_prediction("100", modify_scenario_4.2)
+filtered_scenario_4.2 <- filter_probabilities(results_scenario_4.2)
+
+scenario_4.2_map <- plot_scenario_map(filtered_scenario_4.2, "Scenario 4.2", "scenario_4.2.png")
+print(scenario_4.2_map)
+
+scenario_4.2_grid <- plot_scenario_grid(rasterize_scenario(results_scenario_4.2), "Scenario 4.2", "scenario_4.2_grid.png")
+print(scenario_4.2_grid)
+```
+
+--------------------------------------------------------------------------------------------------------------------------
+# Comparison and Conclusion
+
+## Differences in probabilities and distributions
+
+```{r}
+# Normalize function is already in global functions
+
+# 1. Extract relevant probabilities
+prob_original <- normalize(results_original$predicted_accident_rate_gbm)
+prob_scenario_1 <- normalize(results_scenario_1$predicted_accident_rate_gbm)
+prob_scenario_2 <- normalize(results_scenario_2$predicted_accident_rate_gbm)
+prob_scenario_3 <- normalize(results_scenario_3$predicted_accident_rate_gbm)
+prob_scenario_4.1 <- normalize(results_scenario_4.1$predicted_accident_rate_gbm)
+prob_scenario_4.2 <- normalize(results_scenario_4.2$predicted_accident_rate_gbm)
+
+probability_distribution <- ggplot() +
+  geom_density(aes(x = prob_original, color = "Original")) +
+  geom_density(aes(x = prob_scenario_1, color = "Scenario 1")) +
+  geom_density(aes(x = prob_scenario_2, color = "Scenario 2")) +
+  geom_density(aes(x = prob_scenario_3, color = "Scenario 3")) +
+  geom_density(aes(x = prob_scenario_4.1, color = "Scenario 4.1")) +
+  geom_density(aes(x = prob_scenario_4.2, color = "Scenario 4.2")) +
+  geom_vline(xintercept = 0.8, linetype = "dashed", color = "black", linewidth = 0.5)+
+  labs(subtitle = "Gradient Boosting (GB)",
+       x = "Predicted Accident Probability",
+       y = "Density", color = "Scenario") +
+  scale_color_manual(values = c("Original" = "black", "Scenario 1" = "green3", "Scenario 2" = "red3", "Scenario 3" = "purple", "Scenario 4.1" = "orange1", "Scenario 4.2" = "orange3" )) +
+  theme_minimal()+
+      theme(
+      text = element_text(size = 12),
+      plot.title = element_text(size = 15, hjust = 0.5, color = "black", face = "bold"),
+      plot.subtitle = element_text(size = 13, hjust = 0.5, color = "black", face = "italic"),
+      plot.caption = element_text(size = 7, hjust = 0),
+      plot.title.position = "plot",
+      plot.background = element_rect(fill = NA, color = "black"),
+        legend.position = "bottom",
+        legend.key.size = unit(0.25, 'cm'),
+        legend.key.height = unit(0.25, 'cm'),
+        legend.key.width = unit(0.25, 'cm'),
+        legend.title = element_text(size=8)) +
+  scale_x_continuous(breaks = seq(0, 1, by = 0.2))
+
+print(probability_distribution)
+
+ggsave(file.path(folder_path_figures, "probability_distribution.png"), probability_distribution, width = 8, height=4)
+
+```
+
+## Grid differences
+
+```{r}
+# Helper function for difference plots
+plot_difference_grid <- function(diff_raster, title_text, filename = NULL) {
+  difference_df <- as.data.frame(as(diff_raster, "SpatialPixelsDataFrame"))
+  colnames(difference_df) <- c("value", "x", "y")
+  
+  p <- ggplot() +  
+    geom_sf(data = RoadNetwork, color = "darkgrey", lwd = 0.2) +
+    geom_tile(data = difference_df, aes(x = x, y = y, fill = value), color = NA) +
+    scale_fill_scico(name = "Difference", limits = c(-1, 1), palette = "vik") +
+    geom_sf(data = lake_ZH, fill = alpha("deepskyblue", .1), color = "#cccccc", size = 0.3) +
+    geom_sf(data = city_borders, fill = NA, color = "darkgrey", size = 0.3) +
+    geom_sf(data = forest_ZH, fill = alpha("green4", .2), color = NA) +
+    theme_minimal()+
+    labs(subtitle = title_text) +
+    theme(
+      text = element_text(size = 12),
+      plot.title = element_text(size = 15, hjust = 0.5, color = "black", face = "bold"),
+      plot.subtitle = element_text(size = 13, hjust = 0.5, color = "black", face = "italic"),
+      plot.caption = element_text(size = 7, hjust = 0),
+      plot.title.position = "plot",
+      plot.background = element_rect(fill = NA, color = "black"),
+      panel.background = element_blank(),
+      panel.grid = element_blank(),
+      axis.text = element_blank(),
+      axis.title = element_blank(),
+      legend.title = element_text(size = 8))+
+    coord_sf(datum = st_crs(2056)) +
+    annotation_scale(location = "br", width_hint = 0.25, style = "ticks")+
+    labs(caption = paste0("Source: Open Data Zurich, 2023\n", "ggplot2 ", packageVersion("ggplot2")))
+    
+  print(p)
+  if (!is.null(filename)) {
+    ggsave(file.path(folder_path_figures, filename), p, width = 8, height=8)
+  }
+  return(p)
+}
+
+# Ensure we have rasterized versions. 
+rasterized_scenario_original <- rasterize_scenario(results_original)
+rasterized_scenario_1 <- rasterize_scenario(results_scenario_1)
+rasterized_scenario_2 <- rasterize_scenario(results_scenario_2)
+rasterized_scenario_3 <- rasterize_scenario(results_scenario_3)
+```
+
+
+### Best Worst- Best
+
+```{r}
+# Scenario 2 (Worst?) - Scenario 1 (Best?)
+difference_BW <- rasterized_scenario_2 - rasterized_scenario_1
+difference_grid_BW <- plot_difference_grid(difference_BW, "Scenario 1 to Scenario 2", "difference_grid_BW.png")
+```
+
+### Original- Best
+
+```{r}
+difference_OB <- rasterized_scenario_1 - rasterized_scenario_original
+difference_grid_OB <- plot_difference_grid(difference_OB, "Original to Scenario 1", "difference_grid_OB.png")
+```
+
+### Original- Most Likely
+
+```{r}
+difference_OML <- rasterized_scenario_3 - rasterized_scenario_original
+difference_grid_OML <- plot_difference_grid(difference_OML, "Original to Scenario 3", "difference_grid_OML.png")
+```
+
+### Best- Most Likely
+
+```{r}
+difference_BML <- rasterized_scenario_1 - rasterized_scenario_3
+difference_grid_BML <- plot_difference_grid(difference_BML, "Scenario 3 to Scenario 1", "difference_grid_BML.png")
+```
+
+
+```{r}
+# Composite Plots
+plots_original_OML <- list(results_original$scenario_map, results_scenario_3$scenario_map)
+plots_original_OW <- list(results_original$scenario_map, results_scenario_2$scenario_map)
+
+## Point Distributions
+comparison_OML <- grid.arrange(grobs = plots_original_OML, ncol = 2)
+comparison_OW <- grid.arrange(grobs = plots_original_OW, ncol = 2)
+
+## Grids
+comparison_BW_grid <- grid.arrange(results_scenario_1$scenario_grid, results_scenario_2$scenario_grid, ncol = 2)
+comparison_OB_grid <- grid.arrange(results_original$scenario_grid, results_scenario_1$scenario_grid, ncol = 2)
+comparison_OML_grid <- grid.arrange(results_original$scenario_grid, results_scenario_3$scenario_grid, ncol = 2)
+
+## Differences
+difference_grids_OB_BW <- grid.arrange(difference_grid_OB, difference_grid_BW, ncol = 2)
+difference_grids_OML_BML <- grid.arrange(difference_grid_OML, difference_grid_BML, ncol = 2)
+
+# Save
+ggsave(file.path(folder_path_figures, "comparison_OML.png"), comparison_OML, width = 8, height=8)
+ggsave(file.path(folder_path_figures, "comparison_OW.png"), comparison_OW, width = 8, height=8)
+ggsave(file.path(folder_path_figures, "comparison_BW_grid.png"), comparison_BW_grid, width = 8, height=8)
+ggsave(file.path(folder_path_figures, "comparison_OB_grid.png"), comparison_OB_grid, width = 8, height=8)
+ggsave(file.path(folder_path_figures, "comparison_OML_grid.png"), comparison_OML_grid, width = 8, height=8)
+ggsave(file.path(folder_path_figures, "difference_grids_OB_BW.png"), difference_grids_OB_BW, width = 8, height=8)
+ggsave(file.path(folder_path_figures, "difference_grids_OML_BML.png"), difference_grids_OML_BML, width = 8, height=8)
+
+```
