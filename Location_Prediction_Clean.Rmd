@@ -374,26 +374,27 @@ vif(lmer_1)
 
 ```{r eval=FALSE, include=FALSE}
 # Parameters
-grid_size <- c(8)
-point_count <- c(100000) # Number of points
+grid_sizes <- c(4, 5, 6, 8, 10, 15, 20, 30, 40, 50, 60, 70, 80)
+point_counts <- c(15000, 30000, 45000, 100000, 200000) # Number of points
 point_networks_random <- list()
 
-for (size in point_count) {
+for (grid_size in grid_sizes) {
+  for (point_count in point_counts) {
 
-  # Create a grid using the bounding box of the road buffer with the specified cell size
-  grid <- st_make_grid(st_bbox(buffer_accidents), cellsize = c(grid_size, grid_size), square = TRUE)
-  grid_sf <- st_sf(geometry = grid)
+    # Create a grid using the bounding box of the road buffer with the specified cell size
+    grid <- st_make_grid(st_bbox(buffer_accidents), cellsize = c(grid_size, grid_size), square = TRUE)
+    grid_sf <- st_sf(geometry = grid)
   
   # Intersect the grid with the road buffer
   # Note: ensure buffer_accidents and city_borders logic is correct
   grid_sf_clipped <- st_intersection(grid_sf, buffer_accidents) 
 
-  if (nrow(grid_sf_clipped) >= size) {
-    selected_cells <- grid_sf_clipped[sample(nrow(grid_sf_clipped), size), ]
-  } else {
-    warning("There are fewer than requested grid cells available after intersection. Using all available.")
-    selected_cells <- grid_sf_clipped
-  }
+    if (nrow(grid_sf_clipped) >= point_count) {
+      selected_cells <- grid_sf_clipped[sample(nrow(grid_sf_clipped), point_count), ]
+    } else {
+      warning("There are fewer than requested grid cells available after intersection. Using all available.")
+      selected_cells <- grid_sf_clipped
+    }
   
   # Create a random point within each selected cell
   generate_random_point <- function(cell) {
@@ -403,11 +404,12 @@ for (size in point_count) {
     st_point(c(x, y))
   }
   
-  points <- st_sfc(lapply(selected_cells$geometry, generate_random_point), crs = st_crs(selected_cells))
-  point_network_random <- st_sf(geometry = points)
-  
-  # Assign to the list with a dynamic name
-  point_networks_random[[paste0("point_network_random_", size)]] <- point_network_random
+    points <- st_sfc(lapply(selected_cells$geometry, generate_random_point), crs = st_crs(selected_cells))
+    point_network_random <- st_sf(geometry = points)
+    
+    # Assign to the list with a dynamic name
+    point_networks_random[[paste0("point_network_random_", grid_size, "m_", point_count)]] <- point_network_random
+  }
 }
   
 cols_dist <- c("RedLight", "PedestrianCrossing", "StopSign", "Junction", "ROW", "TramTrack", 
@@ -655,10 +657,10 @@ fit_XGB <- train(model_formula,
 
 ```{r}
 # Generic function to process predictions for a scenario
-process_scenario_prediction <- function(distance, modifier_function = NULL) {
+process_scenario_prediction <- function(grid_size, point_count, modifier_function = NULL) {
   
   # Read the file
-  fpath <- file.path(base_path, "Prediction_Grid/Random", paste0("point_network_random_", distance, ".geojson"))
+  fpath <- file.path(base_path, "Prediction_Grid/Random", paste0("point_network_random_", grid_size, "m_", point_count, ".geojson"))
   if(!file.exists(fpath)) {
      stop(paste("File not found:", fpath))
   }
@@ -683,11 +685,25 @@ process_scenario_prediction <- function(distance, modifier_function = NULL) {
 }
 ```
 
+```{r eval=FALSE, include=FALSE}
+# Optional: run predictions for all grid-size / point-count combinations
+grid_sizes <- c(4, 5, 6, 8, 10, 15, 20, 30, 40, 50, 60, 70, 80)
+point_counts <- c(15000, 30000, 45000, 100000, 200000)
+combos <- expand.grid(grid_size = grid_sizes, point_count = point_counts)
+
+results_original_all <- lapply(seq_len(nrow(combos)), function(i) {
+  gs <- combos$grid_size[i]
+  pc <- combos$point_count[i]
+  process_scenario_prediction(gs, pc)
+})
+names(results_original_all) <- paste0("grid_", combos$grid_size, "m_points_", combos$point_count)
+```
+
 ### Predicting Original Grid
 
 ```{r}
 # Original Scenario (No modification)
-results_original <- process_scenario_prediction("100")
+results_original <- process_scenario_prediction(8, 100000)
 filtered_original <- filter_probabilities(results_original)
 
 # Plot Map
@@ -801,7 +817,7 @@ modify_scenario_1 <- function(data) {
   return(data)
 }
 
-results_scenario_1 <- process_scenario_prediction("100", modify_scenario_1)
+results_scenario_1 <- process_scenario_prediction(8, 100000, modify_scenario_1)
 filtered_scenario_1 <- filter_probabilities(results_scenario_1)
 
 # Plot
@@ -823,7 +839,7 @@ modify_scenario_2 <- function(data) {
   return(data)
 }
 
-results_scenario_2 <- process_scenario_prediction("100", modify_scenario_2)
+results_scenario_2 <- process_scenario_prediction(8, 100000, modify_scenario_2)
 filtered_scenario_2 <- filter_probabilities(results_scenario_2)
 
 scenario_2_map <- plot_scenario_map(filtered_scenario_2, "Scenario 2", "scenario_2.png")
@@ -844,7 +860,7 @@ modify_scenario_3 <- function(data) {
   return(data)
 }
 
-results_scenario_3 <- process_scenario_prediction("100", modify_scenario_3)
+results_scenario_3 <- process_scenario_prediction(8, 100000, modify_scenario_3)
 filtered_scenario_3 <- filter_probabilities(results_scenario_3)
 
 scenario_3_map <- plot_scenario_map(filtered_scenario_3, "Scenario 3", "scenario_3.png")
@@ -866,7 +882,7 @@ modify_scenario_4.1 <- function(data) {
   return(data)
 }
 
-results_scenario_4.1 <- process_scenario_prediction("100", modify_scenario_4.1)
+results_scenario_4.1 <- process_scenario_prediction(8, 100000, modify_scenario_4.1)
 filtered_scenario_4.1 <- filter_probabilities(results_scenario_4.1)
 
 scenario_4.1_map <- plot_scenario_map(filtered_scenario_4.1, "Scenario 4.1", "scenario_4.1.png")
@@ -887,7 +903,7 @@ modify_scenario_4.2 <- function(data) {
   return(data)
 }
 
-results_scenario_4.2 <- process_scenario_prediction("100", modify_scenario_4.2)
+results_scenario_4.2 <- process_scenario_prediction(8, 100000, modify_scenario_4.2)
 filtered_scenario_4.2 <- filter_probabilities(results_scenario_4.2)
 
 scenario_4.2_map <- plot_scenario_map(filtered_scenario_4.2, "Scenario 4.2", "scenario_4.2.png")
