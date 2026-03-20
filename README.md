@@ -1,6 +1,6 @@
 # GEO511 – Master Thesis Programming
 
-This repository contains the code for modelling and predicting accident locations, along with the associated data processing pipeline for the master's thesis (GEO511).
+This repository contains the code for modelling and predicting accident locations, along with the associated data processing pipeline.
 
 ## Contents
 
