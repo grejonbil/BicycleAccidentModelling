@@ -1,65 +1,69 @@
 # GEO511 – Master Thesis Programming
 
-Dieses Repository enthält den Code zur Modellierung und Vorhersage von Unfall-Lokationen sowie die zugehörige Datenverarbeitung für die Masterarbeit (GEO511).
+This repository contains the code for modelling and predicting accident locations, along with the associated data processing pipeline for the master's thesis (GEO511).
 
-## Inhalt
+## Contents
 
 - `R/Location_Prediction_Clean.Rmd`  
-  Zentrales Analyse‑Notebook: Datenaufbereitung, Feature‑Engineering, Modelltraining (GBM/RF/XGB), Generierung von Zufallspunkten, Szenario‑Vorhersagen und Raster‑Visualisierung.
+  Central analysis notebook: data preparation, feature engineering, model training (GBM/RF/XGB), generation of random points, scenario predictions, and raster visualisation.
 - `Data/`, `GIS/`, `JMP/`, `Literature/`  
-  Daten, GIS‑Material, Zusatzanalysen und Literatur (lokal, nicht versioniert oder nur teilweise enthalten).
+  Data, GIS materials, supplementary analyses, and literature (stored locally; not versioned or only partially included).
 - `random_grid.py`, `random_grid.ipynb`, `dissolve.ipynb`  
-  Hilfsskripte/Notebooks für ergänzende Verarbeitung.
+  Helper scripts/notebooks for supplementary processing steps.
 
-## Voraussetzungen
+## Requirements
 
-In R benötigt (mindestens):  
-`sf`, `raster`, `rasterVis`, `ggplot2`, `dplyr`, `caret`, `gbm`, `randomForest`, `xgboost`, `future`, `future.apply`, `boot`, `gridExtra`
+The following R packages are required (minimum):
 
-Hinweis: Die exakten Paketversionen sind nicht fixiert. Falls Reproduzierbarkeit nötig ist, bitte ein `renv`/`packrat` Setup ergänzen.
+```r
+sf, raster, rasterVis, ggplot2, dplyr, caret, gbm, randomForest, xgboost, future, future.apply, boot, gridExtra
+```
 
-## Datenstruktur (erwartet)
+> **Note:** Exact package versions are not pinned. If reproducibility is required, please add an `renv` or `packrat` setup.
 
-Die R‑Markdown erwartet eine definierte Ordnerstruktur, insbesondere:
+## Data Structure (Expected)
 
-- Eingabedaten unter `Data/` und/oder `GIS/`
-- Zielausgabe unter `Prediction_Grid/Random/` (wird bei Bedarf erzeugt)
+The R Markdown file expects a defined folder structure, in particular:
 
-Pfadlogik und Dateinamen sind im Notebook festgelegt. Wenn du lokal abweichende Strukturen nutzt, passe die Pfade in `R/Location_Prediction_Clean.Rmd` an.
+- Input data located under `Data/` and/or `GIS/`
+- Target output written to `Prediction_Grid/Random/` (created automatically if needed)
 
-## Workflow (Kurzüberblick)
+Path logic and file names are defined within the notebook. If your local directory structure differs, adjust the paths in `R/Location_Prediction_Clean.Rmd` accordingly.
 
-1. Daten laden und bereinigen  
-2. Feature‑Berechnung (z. B. Distanzen zu Infrastruktur‑Objekten)  
-3. Modelltraining (GBM, RF, XGB)  
-4. Generierung von Zufallspunkten in Rasterzellen  
-5. Szenario‑Vorhersagen + Rasterisierung/Plots
+## Workflow (Overview)
 
-## Raster‑ und Punkt‑Parameter
+1. Load and clean data
+2. Feature computation (e.g. distances to infrastructure objects)
+3. Model training (GBM, RF, XGB)
+4. Generation of random points within raster cells
+5. Scenario predictions + rasterisation and plotting
 
-Im Notebook wird über Kombinationen aus Rasterzellgröße und Anzahl modellierter Punkte iteriert:
+## Raster and Point Parameters
 
-- Rasterzellgrößen (Meter): `4, 5, 6, 8, 10, 15, 20, 30, 40, 50, 60, 70, 80`
-- Anzahl Punkte: `15'000, 30'000, 45'000, 100'000, 200'000`
+The notebook iterates over combinations of raster cell sizes and numbers of modelled points:
 
-Die generierten Punkt‑Dateien werden so benannt:
-`point_network_random_<grid>m_<points>.geojson`
+| Parameter | Values |
+|---|---|
+| Raster cell sizes (metres) | `4, 5, 6, 8, 10, 15, 20, 30, 40, 50, 60, 70, 80` |
+| Number of points | `15,000 · 30,000 · 45,000 · 100,000 · 200,000` |
 
-Beispiel: `point_network_random_8m_100000.geojson`
+Generated point files follow this naming convention:
 
-## Ausführen
+```
+point_network_random_<grid>m_<points>.geojson
+```
 
-Öffne `R/Location_Prediction_Clean.Rmd` in RStudio und führe die relevanten Chunks aus.  
-Viele Schritte sind `eval=FALSE`, um Laufzeit zu sparen. Entferne das Flag bewusst bei Bedarf.
+**Example:** `point_network_random_8m_100000.geojson`
 
-## Ergebnisse
+## Running the Analysis
 
-Output‑Dateien und Karten werden im Notebook konfiguriert (z. B. `Prediction_Grid/Random/` sowie Plot‑Ausgabeordner).
+Open `R/Location_Prediction_Clean.Rmd` in RStudio and execute the relevant chunks.  
+Many steps are set to `eval=FALSE` to reduce runtime. Remove this flag deliberately when needed.
 
-## Hinweise
+## Output
 
-- Die Verarbeitung kann je nach Punktanzahl und Zellgröße sehr rechenintensiv sein.  
-- Achte auf ausreichend RAM und Laufzeit, insbesondere bei 200k Punkten.  
-- Für parallele Verarbeitung wird `future` verwendet.
+Output files and maps are configured within the notebook (e.g. written to `Prediction_Grid/Random/` and designated plot output folders).
 
----
+## Notes
+
+> ⚠️ Processing can be computationally intensive depending on the number of points and cell size selected. Ensure sufficient RAM and runtime, particularly when using 200,000 points. Parallel processing is handled via the `future` package.
