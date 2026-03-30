@@ -26,6 +26,15 @@ The R Markdown file expects a defined folder structure, in particular:
 - Input data located under `Data/` and/or `GIS/`
 - Target output written to `Prediction_Grid/Random/` (created automatically if needed)
 
+### Data Links
+In the follwing all the links to access the data are listed. The data used in this study are available through official Swiss open data portals, primarily the Open Data portal of the City of Zurich, the Open Data / Geoportal services of the Canton of Zurich, and the Swiss national open data catalogue opendata.swiss. Bicycle accident records were derived from official road traffic accident data for the City of Zurich / Switzerland.
+
+- City of Zurich Open Data / Geodata portal: https://www.stadt-zuerich.ch/geodaten/
+- City of Zurich Open Data catalogue: https://data.stadt-zuerich.ch/dataset
+- Canton of Zurich Geoportal: https://geo.zh.ch/
+- Canton of Zurich open geodata: https://www.zh.ch/de/politik-staat/opendata/offene-geodaten.html
+- Swiss national open data portal: https://opendata.swiss/
+
 Path logic and file names are defined within the notebook. If your local directory structure differs, adjust the paths in `R/Location_Prediction_Clean.Rmd` accordingly.
 
 ## Workflow (Overview)
