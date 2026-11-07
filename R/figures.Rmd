@@ -1,0 +1,240 @@
+---
+title: "Figures"
+subtitle: "Predicting bicycle accident locations from road infrastructure (Zurich, 2016–2025)"
+output:
+  html_document:
+    toc: true
+---
+
+This notebook draws all figures of the manuscript (Figures 4–9) and of the
+Supplementary Material (Figure S1). Each figure has its own chunk and can be run
+and edited on its own. The figures are built from the results of
+`model_evaluation.R` (tables in `results/tables/`, model outputs in
+`results/figure_data/`) and the prepared data (`Data/`), so no model has to be
+re-fitted to change a figure.
+
+Run the chunks in RStudio (working directory `R/`), or render the whole notebook
+with `rmarkdown::render("figures.Rmd")`. With `save_png <- TRUE`, every chunk also
+writes its figure to `results/figures/`.
+
+# Setup
+
+```{r setup, message = FALSE, warning = FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, fig.align = "center")
+library(sf); library(dplyr); library(ggplot2); library(scico); library(patchwork); library(shapviz)
+sf_use_s2(FALSE)
+
+data_dir <- Sys.getenv("BAM_DATA_DIR", file.path("..", "Data"))
+res_dir  <- Sys.getenv("BAM_RESULTS_DIR", file.path("..", "results"))
+tab_dir  <- file.path(res_dir, "tables")
+fig_data <- file.path(res_dir, "figure_data")
+fig_dir  <- file.path(res_dir, "figures")
+save_png <- TRUE          # set to FALSE to only preview the figures
+
+save_figure <- function(p, name, width, height, dpi = 300) {
+  if (save_png) ggsave(file.path(fig_dir, paste0(name, ".png")), p, width = width, height = height, dpi = dpi, bg = "white")
+  p
+}
+```
+
+## Styles
+
+```{r styles}
+source_note <- "Source: Open Data Zurich, 2026"
+scenario_colours <- c("Baseline" = "black", "Optimal" = "green3", "Congested" = "red3",
+                      "Realistic" = "purple", "Control 1" = "orange1", "Control 2" = "orange3")
+
+# frame, title, caption and legend of the map panels
+theme_panel <- function(legend = "right") theme_void(base_size = 12) + theme(
+  plot.title = element_text(size = 20, hjust = 0.5, margin = ggplot2::margin(6, 0, 6, 0)),
+  plot.caption = element_text(size = 8, hjust = 0),
+  plot.caption.position = "plot",
+  plot.background = element_rect(fill = "white", colour = "black", linewidth = 0.6),
+  plot.margin = ggplot2::margin(8, 10, 8, 10),
+  legend.position = legend, legend.title = element_text(size = 10), legend.text = element_text(size = 9),
+  legend.key.height = unit(0.9, "cm"), legend.key.width = unit(0.4, "cm"))
+
+# background of all maps: city boundary, forest, lake and road network
+base_layers <- function() list(
+  geom_sf(data = context$city, fill = "white", colour = "#cccccc", linewidth = 0.3),
+  geom_sf(data = context$forest, fill = alpha("green4", 0.2), colour = NA),
+  geom_sf(data = context$lake, fill = alpha("deepskyblue", 0.3), colour = NA),
+  geom_sf(data = road_network, colour = "darkgrey", linewidth = 0.15))
+
+finish_map <- function(p, title) p + coord_sf(crs = 2056, datum = NA) +
+  labs(title = title, caption = source_note, x = NULL, y = NULL)
+
+four_panels <- function(plots) wrap_plots(plots, ncol = 2) &
+  theme(plot.background = element_rect(fill = "white", colour = "black", linewidth = 0.6))
+```
+
+## Data
+
+```{r data}
+ctx <- function(n) st_read(file.path(data_dir, "context", paste0(n, ".gpkg")), quiet = TRUE)
+context <- list(city = ctx("city_boundary"), lake = ctx("lake"), forest = ctx("forest"))
+road_network <- st_read(file.path(data_dir, "infrastructure", "road_network.gpkg"), quiet = TRUE) %>%
+  filter(SpedLmt < 80, SpedLmt != 0)
+accidents_xy <- as.data.frame(st_coordinates(st_read(file.path(data_dir, "accidents", "accidents.gpkg"), quiet = TRUE)))
+
+# prediction grid (200,000 points, 25 m buffer, 5 m cells); same rows as the scenario predictions
+grid <- st_read(file.path(data_dir, "prediction_grid", "grid_200000_points_25m_buffer_5m_cells.gpkg"), quiet = TRUE) %>%
+  subset(SpedLmt < 80 & SpedLmt != 0)
+grid_xy <- st_coordinates(grid)
+
+# predicted probabilities of the reference GB model for all scenarios and grid points
+scen <- readRDS(file.path(fig_data, "scenario_predictions.rds"))
+sp <- scen$predictions; youden <- scen$youden
+shown <- c("Baseline", "Optimal", "Congested", "Realistic")
+P <- setNames(lapply(shown, function(s) sp$p[sp$scenario == s]), shown)
+stopifnot(all(lengths(P) == nrow(grid_xy)))
+
+# mean value per 25 m cell (Figures 6 and 7)
+cells <- function(v, res = 25)
+  setNames(aggregate(v ~ x + y, data.frame(x = floor(grid_xy[, 1] / res) * res + res / 2,
+                                           y = floor(grid_xy[, 2] / res) * res + res / 2, v = v), mean),
+           c("x", "y", "value"))
+```
+
+# Figure 4: Distribution of predicted probabilities
+
+Density of the predicted probabilities per scenario; dashed line: threshold 0.8,
+dotted line: Youden-optimal threshold.
+
+```{r figure-4, fig.width = 8, fig.height = 4}
+p <- ggplot(sp, aes(p, colour = scenario)) +
+  geom_density(linewidth = 0.6) +
+  geom_vline(xintercept = 0.8, linetype = "dashed") +
+  geom_vline(xintercept = youden, linetype = "dotted") +
+  scale_colour_manual(values = scenario_colours) +
+  scale_x_continuous(breaks = seq(0, 1, by = 0.2)) +
+  labs(subtitle = "Gradient Boosting (GB)", x = "Predicted Accident Probability", y = "Density", colour = "Scenario") +
+  theme_minimal(base_size = 12) +
+  theme(plot.subtitle = element_text(size = 13, hjust = 0.5, face = "italic"),
+        plot.background = element_rect(fill = "white", colour = "black"),
+        legend.position = "bottom", legend.text = element_text(face = "bold", size = 9),
+        legend.key.size = unit(0.4, "cm"))
+save_figure(p, "figure_4_probability_density", width = 8, height = 4)
+```
+
+# Figure 5: Predicted accident locations
+
+Grid points with a predicted probability ≥ 0.8 (black) over the kernel density of
+the recorded accidents.
+
+```{r figure-5, fig.width = 12, fig.height = 12.4}
+map_hotspots <- function(scenario, threshold = 0.8) {
+  pts <- data.frame(x = grid_xy[, 1], y = grid_xy[, 2])[P[[scenario]] >= threshold, ]
+  p <- ggplot() + base_layers() +
+    stat_density_2d(data = accidents_xy, aes(X, Y, fill = after_stat(level), alpha = after_stat(level)),
+                    geom = "polygon", h = c(500, 500)) +
+    scale_fill_gradient(low = "yellow", high = "red", guide = "none") +
+    scale_alpha_continuous(range = c(0, 1), guide = "none") +
+    geom_point(data = pts, aes(x, y), size = 0.1, colour = "black")
+  finish_map(p, paste("Scenario", scenario)) + theme_panel("none")
+}
+p <- four_panels(lapply(shown, map_hotspots))
+save_figure(p, "figure_5_predicted_accident_locations", width = 12, height = 12.4, dpi = 220)
+```
+
+# Figure 6: Predicted probabilities
+
+Mean predicted probability per 25 m cell.
+
+```{r figure-6, fig.width = 12, fig.height = 11.1}
+map_probability <- function(scenario) {
+  p <- ggplot() + base_layers() +
+    geom_tile(data = cells(P[[scenario]]), aes(x, y, fill = value), colour = NA) +
+    scale_fill_scico("Probability", palette = "lajolla", limits = c(0, 1), direction = -1)
+  finish_map(p, paste("Scenario", scenario)) + theme_panel("right")
+}
+p <- four_panels(lapply(shown, map_probability))
+save_figure(p, "figure_6_predicted_probabilities", width = 12, height = 11.1, dpi = 220)
+```
+
+# Figure 7: Differences between scenarios
+
+Difference of the mean predicted probability per 25 m cell (second minus first
+scenario; negative values = lower predicted probability).
+
+```{r figure-7, fig.width = 12, fig.height = 11}
+pairs <- list(c("Realistic", "Baseline", "Baseline to Scenario Realistic"),
+              c("Optimal", "Realistic", "Scenario Realistic to Scenario Optimal"),
+              c("Optimal", "Baseline", "Baseline to Scenario Optimal"),
+              c("Congested", "Optimal", "Scenario Optimal to Scenario Congested"))
+map_difference <- function(pp) {
+  p <- ggplot() + base_layers() +
+    geom_tile(data = cells(P[[pp[1]]] - P[[pp[2]]]), aes(x, y, fill = value), colour = NA) +
+    scale_fill_scico("Difference", palette = "vik", limits = c(-1, 1))
+  finish_map(p, pp[3]) + theme_panel("right")
+}
+p <- four_panels(lapply(pairs, map_difference))
+save_figure(p, "figure_7_probability_differences", width = 12, height = 11, dpi = 220)
+```
+
+# Figure 8: SHAP values
+
+SHAP values of the 14 predictors of the GB model for 600 randomly selected
+observations; the colour indicates the feature value (low to high).
+
+```{r figure-8, fig.width = 8, fig.height = 6}
+shap <- readRDS(file.path(fig_data, "shap_values.rds"))
+p <- sv_importance(shapviz(shap$shap, X = shap$X), kind = "beeswarm", max_display = 14) +
+  scale_colour_gradient(low = "#9DB9D3", high = "#B4584A", breaks = c(0, 1), labels = c("Low", "High"),
+                        name = "Feature value") +
+  labs(x = "SHAP value (contribution to the predicted probability)") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(), panel.grid.major.y = element_blank(),
+        plot.background = element_rect(fill = "white", colour = NA))
+save_figure(p, "figure_8_shap_values", width = 8, height = 6)
+```
+
+# Figure 9: Partial dependence
+
+Two-dimensional partial dependence of the predicted accident probability for the
+two interaction terms of the model: (a) traffic exposure and speed limit,
+(b) road width and speed limit.
+
+```{r figure-9, fig.width = 10, fig.height = 4.5}
+pd1 <- read.csv(file.path(tab_dir, "partial_dependence_speed_exposure.csv"))
+pd2 <- read.csv(file.path(tab_dir, "partial_dependence_roadwidth_speed.csv"))
+speed_colours <- c("20" = "#A6C8E0", "30" = "#6FA3C8", "50" = "#3B77A8", "60" = "#1F4E79")   # light = low speed
+pd_theme <- theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank(),
+        plot.title = element_text(size = 12), plot.background = element_rect(fill = "white", colour = NA))
+fa <- ggplot(pd1, aes(Exposition, yhat, colour = factor(SpedLmt))) +
+  geom_line(linewidth = 0.8) + scale_colour_manual(values = speed_colours) +
+  labs(x = "Exposure [vehicles/day]", y = "Partial dependence (probability)", colour = "Speed limit [km/h]",
+       title = "(a) Exposure × speed limit") + pd_theme
+fb <- ggplot(pd2, aes(RodWdth, yhat, colour = factor(SpedLmt))) +
+  geom_line(linewidth = 0.8) + scale_colour_manual(values = speed_colours) +
+  labs(x = "Road width [m]", y = "Partial dependence (probability)", colour = "Speed limit [km/h]",
+       title = "(b) Road width × speed limit") + pd_theme
+p <- (fa | fb) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+save_figure(p, "figure_9_partial_dependence", width = 10, height = 4.5)
+```
+
+# Figure S1: Calibration curves
+
+Mean predicted probability vs. observed share of accident points per decile
+(spatial block cross-validation, 1,000 m blocks).
+
+```{r figure-S1, fig.width = 5, fig.height = 5}
+cal <- read.csv(file.path(tab_dir, "calibration_curves.csv"))
+model_colours <- c("RF" = "#9DB9D3", "GB" = "#B4584A", "XGB" = "#3B77A8")
+p <- ggplot(cal, aes(x = mean_predicted,
+                     y = observed_share,
+                     colour = model)) +
+  geom_abline(lty = 2, colour = "grey50") +
+  geom_line() +
+  geom_point() +
+  coord_equal(xlim = c(0, 1), ylim = c(0, 1)) +
+  scale_colour_manual(values = model_colours) +
+  labs(
+    x = "Mean predicted probability (decile)",
+    y = "Observed share of accident points",
+    colour = NULL
+  ) +
+  theme_minimal()
+save_figure(p, "figure_S1_calibration", width = 5, height = 5)
+```

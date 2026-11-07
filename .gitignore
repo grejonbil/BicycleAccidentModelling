@@ -1,0 +1,28 @@
+# R session files
+.Rhistory
+.Rapp.history
+.RData
+.RDataTmp
+.Ruserdata
+.Renviron
+.Rproj.user/
+*.Rproj
+
+# knitr / R Markdown
+*_cache/
+/cache/
+*.utf8.md
+*.knit.md
+R/*.html
+
+# Input data (not redistributed, see README.md)
+Data/
+data/*
+!data/complex_intersections_2023.gpkg
+!data/pseudo_absence_points_2023.gpkg
+
+# Intermediate model objects
+results/cache/
+
+# OS files
+.DS_Store
