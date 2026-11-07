@@ -2,7 +2,7 @@
 
 Code and results for the article
 
-> Biland, G., Fu, C., Brucks, W., Weibel, R. *Speed reduction alone is not enough for bicycle safety: Predicting bicycle accident locations from road infrastructure using machine learning.* Geo-spatial Information Science (under review).
+> Biland, G., Fu, C., Brucks, W., Weibel, R. *Speed reduction alone may not be enough for bicycle safety: Predicting bicycle accident locations from road infrastructure using machine learning.* Geo-spatial Information Science (under review).
 
 Police-reported bicycle accidents in the City of Zurich (2016–2025) are modelled against pseudo-absence points on the cycling network. Gradient Boosting (GB), Random Forest (RF) and XGBoost (XGB) classifiers are trained on 14 infrastructure and traffic features, evaluated with random and spatial block cross-validation and probabilistic scoring rules, interpreted with SHAP values and partial dependence, and applied to six infrastructure scenarios with bootstrap uncertainty estimates.
 
