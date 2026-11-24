@@ -32,17 +32,17 @@ jobs:
         with:
           r-version: '4.3.3'
       - name: Install system dependencies
-        run: brew install gdal geos proj udunits glpk libomp
-      - name: Configure OpenMP for source builds (xgboost needs Homebrew's libomp explicitly linked)
-        run: |
-          mkdir -p ~/.R
-          omp_prefix="$(brew --prefix libomp)"
-          cat >> ~/.R/Makevars <<EOF
-          CPPFLAGS += -Xclang -fopenmp -I${omp_prefix}/include
-          LDFLAGS += -L${omp_prefix}/lib -lomp
-          EOF
+        run: brew install gdal geos proj udunits glpk
       - name: Install R package dependencies
-        run: Rscript R/install_packages.R
+        run: |
+          # xgboost's configure script auto-detects Homebrew's libomp and links
+          # against it, while R's own default link path pulls in the different,
+          # older libomp.dylib R itself bundles -- loading both into one process
+          # segfaults. Hiding `brew` from PATH makes xgboost's configure cleanly
+          # fall back to a single-threaded (non-OpenMP) build, which is correct
+          # and crash-free; CI only needs it to install and load, not be fast.
+          export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v homebrew | tr '\n' ':')
+          Rscript R/install_packages.R
       - name: Syntax-check R scripts
         run: |
           files <- list.files("R", pattern = "\\.R$", full.names = TRUE)
