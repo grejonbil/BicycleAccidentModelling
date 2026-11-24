@@ -5,6 +5,10 @@
 #
 # See https://github.com/r-lib/actions/tree/master/examples#readme for
 # additional example workflows available for the R community.
+#
+# This is not an R package (no DESCRIPTION), so there is nothing for
+# rcmdcheck to check. Instead this installs the pinned dependencies
+# (R/install_packages.R) and syntax-checks every script in R/.
 
 name: R
 
@@ -19,22 +23,22 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-latest
-    strategy:
-      matrix:
-        r-version: ['3.6.3', '4.1.1']
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
-      - name: Set up R ${{ matrix.r-version }}
+      - name: Set up R 4.3
         uses: r-lib/actions/setup-r@f57f1301a053485946083d7a45022b278929a78a
         with:
-          r-version: ${{ matrix.r-version }}
-      - name: Install dependencies
+          r-version: '4.3.3'
+      - name: Install system dependencies
         run: |
-          install.packages(c("remotes", "rcmdcheck"))
-          remotes::install_deps(dependencies = TRUE)
-        shell: Rscript {0}
-      - name: Check
-        run: rcmdcheck::rcmdcheck(args = "--no-manual", error_on = "error")
+          sudo apt-get update
+          sudo apt-get install -y libgdal-dev libgeos-dev libproj-dev libudunits2-dev libglpk-dev
+      - name: Install R package dependencies
+        run: Rscript R/install_packages.R
+      - name: Syntax-check R scripts
+        run: |
+          files <- list.files("R", pattern = "\\.R$", full.names = TRUE)
+          for (f in files) { message("Parsing ", f); parse(f) }
         shell: Rscript {0}
