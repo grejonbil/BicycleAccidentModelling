@@ -23,7 +23,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -32,9 +32,7 @@ jobs:
         with:
           r-version: '4.3.3'
       - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgdal-dev libgeos-dev libproj-dev libudunits2-dev libglpk-dev
+        run: brew install gdal geos proj udunits glpk
       - name: Install R package dependencies
         run: Rscript R/install_packages.R
       - name: Syntax-check R scripts
