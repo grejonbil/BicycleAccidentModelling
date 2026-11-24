@@ -32,7 +32,15 @@ jobs:
         with:
           r-version: '4.3.3'
       - name: Install system dependencies
-        run: brew install gdal geos proj udunits glpk
+        run: brew install gdal geos proj udunits glpk libomp
+      - name: Configure OpenMP for source builds (xgboost needs Homebrew's libomp explicitly linked)
+        run: |
+          mkdir -p ~/.R
+          omp_prefix="$(brew --prefix libomp)"
+          cat >> ~/.R/Makevars <<EOF
+          CPPFLAGS += -Xclang -fopenmp -I${omp_prefix}/include
+          LDFLAGS += -L${omp_prefix}/lib -lomp
+          EOF
       - name: Install R package dependencies
         run: Rscript R/install_packages.R
       - name: Syntax-check R scripts
